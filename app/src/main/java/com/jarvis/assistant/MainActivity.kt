@@ -86,7 +86,7 @@ class MainActivity : Activity() {
             )
         })
         root.addView(button("Allow: battery unrestricted") {
-            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATIONS_SETTINGS))
+            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
         })
 
         setContentView(ScrollView(this).apply { addView(root) })

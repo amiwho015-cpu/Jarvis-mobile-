@@ -1,144 +1,189 @@
 package com.jarvis.assistant
 
-import android.Manifest
 import android.app.Activity
-import android.content.Context
+import android.content.ActivityNotFoundException
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.provider.Settings
-import android.text.InputType
+import android.os.Handler
+import android.os.Looper
+import android.speech.RecognizerIntent
+import android.speech.tts.TextToSpeech
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Spinner
 import android.widget.TextView
+import java.util.Locale
 
+// Chat screen: text + mic, agent picker at the top.
 class MainActivity : Activity() {
 
-    private lateinit var keyField: EditText
-    private lateinit var modelField: EditText
-    private lateinit var langField: EditText
-    private lateinit var wakeField: EditText
-    private lateinit var status: TextView
+    private lateinit var prefs: Prefs
+    private lateinit var list: LinearLayout
+    private lateinit var scroll: ScrollView
+    private lateinit var input: EditText
+    private val history = ArrayList<Msg>()
+    private var tts: TextToSpeech? = null
+    private val ui = Handler(Looper.getMainLooper())
+
+    private fun dp(n: Int): Int = (n * resources.displayMetrics.density).toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val prefs = getSharedPreferences("jarvis", Context.MODE_PRIVATE)
-        val pad = (16 * resources.displayMetrics.density).toInt()
+        prefs = Prefs(this)
 
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(pad, pad, pad, pad)
+        val match = ViewGroup.LayoutParams.MATCH_PARENT
+        val wrap = ViewGroup.LayoutParams.WRAP_CONTENT
+        val pad = dp(12)
+
+        val root = LinearLayout(this)
+        root.orientation = LinearLayout.VERTICAL
+        root.setPadding(pad, pad, pad, pad)
+
+        val top = LinearLayout(this)
+        top.orientation = LinearLayout.HORIZONTAL
+        top.gravity = Gravity.CENTER_VERTICAL
+
+        val title = TextView(this)
+        title.text = "Jarvis"
+        title.textSize = 22f
+        top.addView(title, LinearLayout.LayoutParams(0, wrap, 1f))
+
+        val spinner = Spinner(this)
+        spinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, Agents.names)
+        val idx = Agents.names.indexOf(prefs.s("agent", "assistant"))
+        spinner.setSelection(if (idx < 0) 0 else idx)
+        spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                prefs.put("agent", Agents.names[position])
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
+        top.addView(spinner)
 
-        fun label(t: String) = TextView(this).apply {
-            text = t
-            setPadding(0, pad, 0, 0)
+        val settingsBtn = Button(this)
+        settingsBtn.text = "Settings"
+        settingsBtn.setOnClickListener {
+            startActivity(Intent(this@MainActivity, SettingsActivity::class.java))
         }
+        top.addView(settingsBtn)
+        root.addView(top, LinearLayout.LayoutParams(match, wrap))
 
-        fun field(value: String, password: Boolean = false) = EditText(this).apply {
-            setText(value)
-            setSingleLine(true)
-            if (password) inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-        }
+        list = LinearLayout(this)
+        list.orientation = LinearLayout.VERTICAL
+        scroll = ScrollView(this)
+        scroll.addView(list)
+        root.addView(scroll, LinearLayout.LayoutParams(match, 0, 1f))
 
-        fun button(t: String, action: () -> Unit) = Button(this).apply {
-            text = t
-            setOnClickListener { action() }
-        }
+        input = EditText(this)
+        input.hint = "Message Jarvis"
+        input.maxLines = 4
 
-        root.addView(TextView(this).apply {
-            text = "Jarvis"
-            textSize = 28f
-        })
+        val bottom = LinearLayout(this)
+        bottom.orientation = LinearLayout.HORIZONTAL
+        bottom.addView(input, LinearLayout.LayoutParams(0, wrap, 1f))
 
-        status = TextView(this).apply { setPadding(0, pad / 2, 0, 0) }
-        root.addView(status)
+        val micBtn = Button(this)
+        micBtn.text = "Mic"
+        micBtn.setOnClickListener { listenOnce() }
+        bottom.addView(micBtn)
 
-        root.addView(label("Gemini API key (aistudio.google.com)"))
-        keyField = field(prefs.getString("api_key", "") ?: "", true)
-        root.addView(keyField)
+        val sendBtn = Button(this)
+        sendBtn.text = "Send"
+        sendBtn.setOnClickListener { send(input.text.toString()) }
+        bottom.addView(sendBtn)
+        root.addView(bottom, LinearLayout.LayoutParams(match, wrap))
 
-        root.addView(label("Gemini model"))
-        modelField = field(prefs.getString("model", "gemini-2.5-flash") ?: "gemini-2.5-flash")
-        root.addView(modelField)
+        setContentView(root)
 
-        root.addView(label("Language (en-US, bn-BD, hi-IN ...)"))
-        langField = field(prefs.getString("lang", "en-US") ?: "en-US")
-        root.addView(langField)
+        addMsg(
+            "Hello. Pick an agent at the top: assistant (tools), simple (chat), " +
+                "research (web) or briefing (morning digest). Set your API key in Settings first.",
+            false
+        )
 
-        root.addView(label("Wake word"))
-        wakeField = field(prefs.getString("wake", "jarvis") ?: "jarvis")
-        root.addView(wakeField)
-
-        root.addView(button("Save") { save(); status.text = "Saved." })
-        root.addView(button("Start Jarvis") { startJarvis() })
-        root.addView(button("Stop Jarvis") {
-            stopService(Intent(this, JarvisService::class.java))
-            refreshStatus()
-        })
-        root.addView(button("Allow: display over other apps (open app command)") {
-            startActivity(
-                Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
-            )
-        })
-        root.addView(button("Allow: battery unrestricted") {
-            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-        })
-
-        setContentView(ScrollView(this).apply { addView(root) })
-    }
-
-    override fun onResume() {
-        super.onResume()
-        refreshStatus()
-    }
-
-    private fun refreshStatus() {
-        status.text = if (JarvisService.running) "Status: running" else "Status: stopped"
-    }
-
-    private fun save() {
-        getSharedPreferences("jarvis", Context.MODE_PRIVATE).edit()
-            .putString("api_key", keyField.text.toString().trim())
-            .putString("model", modelField.text.toString().trim().ifEmpty { "gemini-2.5-flash" })
-            .putString("lang", langField.text.toString().trim().ifEmpty { "en-US" })
-            .putString("wake", wakeField.text.toString().trim().lowercase().ifEmpty { "jarvis" })
-            .apply()
-    }
-
-    private fun startJarvis() {
-        save()
-        if (keyField.text.isBlank()) {
-            status.text = "Age Gemini API key boshao."
-            return
-        }
-        val need = mutableListOf<String>()
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            need.add(Manifest.permission.RECORD_AUDIO)
-        }
-        if (Build.VERSION.SDK_INT >= 33 &&
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            need.add(Manifest.permission.POST_NOTIFICATIONS)
-        }
-        if (need.isNotEmpty()) requestPermissions(need.toTypedArray(), 1) else launchService()
-    }
-
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-            launchService()
-        } else {
-            status.text = "Microphone permission lagbe."
+        tts = TextToSpeech(this) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                tts?.language = Locale.forLanguageTag(prefs.s("lang", "en-US"))
+            }
         }
     }
 
-    private fun launchService() {
-        startForegroundService(Intent(this, JarvisService::class.java))
-        status.text = "Status: running"
+    private fun addMsg(text: String, user: Boolean): TextView {
+        val tv = TextView(this)
+        tv.text = text
+        tv.textSize = 16f
+        tv.setTextIsSelectable(true)
+        tv.setPadding(dp(10), dp(8), dp(10), dp(8))
+        tv.setTextColor(if (user) 0xFF8AB4F8.toInt() else 0xFFE8EAED.toInt())
+        val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp.gravity = if (user) Gravity.END else Gravity.START
+        lp.setMargins(0, dp(4), 0, dp(4))
+        list.addView(tv, lp)
+        scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
+        return tv
+    }
+
+    private fun send(textIn: String) {
+        val text = textIn.trim()
+        val agent = prefs.s("agent", "assistant")
+        if (text.isEmpty() && agent != "briefing") return
+        input.setText("")
+        val shown = if (text.isEmpty()) "Morning briefing" else text
+        addMsg(shown, true)
+        val placeholder = addMsg("...", false)
+        val snapshot = ArrayList<Msg>(history)
+        val app = applicationContext
+
+        Thread {
+            val reply = try {
+                Agents.run(app, prefs, agent, snapshot, shown)
+            } catch (e: Exception) {
+                "Error: ${e.message}"
+            }
+            ui.post {
+                placeholder.text = reply
+                history.add(Msg("user", shown))
+                history.add(Msg("assistant", reply))
+                while (history.size > 12) history.removeAt(0)
+                scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
+                if (prefs.b("speak", true)) {
+                    tts?.speak(reply, TextToSpeech.QUEUE_FLUSH, null, "reply")
+                }
+            }
+        }.start()
+    }
+
+    private fun listenOnce() {
+        val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+        i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, prefs.s("lang", "en-US"))
+        try {
+            startActivityForResult(i, 100)
+        } catch (e: ActivityNotFoundException) {
+            addMsg("Speech input is not available on this phone.", false)
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 100 && resultCode == RESULT_OK) {
+            val t = data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+            if (!t.isNullOrBlank()) send(t)
+        }
+    }
+
+    override fun onDestroy() {
+        tts?.stop()
+        tts?.shutdown()
+        super.onDestroy()
     }
 }

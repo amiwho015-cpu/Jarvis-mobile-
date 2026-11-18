@@ -21,14 +21,7 @@ jobs:
           gradle-version: 8.7
 
       - name: Build debug APK
-        run: |
-          set -o pipefail
-          gradle assembleDebug --console=plain 2>&1 | tee build.log
-
-      - name: Show errors
-        if: failure()
-        run: |
-          grep -n -E "^e: |What went wrong|Execution failed|Caused by|licen|not found" -A4 build.log | head -60
+        run: gradle assembleDebug --stacktrace
 
       - uses: actions/upload-artifact@v4
         with:

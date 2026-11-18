@@ -6,7 +6,6 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
-import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Bundle
@@ -43,8 +42,8 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     private var busy = false
     private var stopAfterSpeak = false
     private var wakeLock: PowerManager.WakeLock? = null
-    private val history = ArrayList<Pair<String, String>>()
-    private lateinit var prefs: SharedPreferences
+    private val history = ArrayList<Msg>()
+    private lateinit var prefs: Prefs
     private var lang = "en-US"
     private var wake = "jarvis"
 
@@ -52,7 +51,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
 
     override fun onCreate() {
         super.onCreate()
-        prefs = getSharedPreferences("jarvis", MODE_PRIVATE)
+        prefs = Prefs(this)
 
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
@@ -77,8 +76,8 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             stopSelf()
             return START_NOT_STICKY
         }
-        lang = prefs.getString("lang", "en-US") ?: "en-US"
-        wake = (prefs.getString("wake", "jarvis") ?: "jarvis").lowercase().trim().ifEmpty { "jarvis" }
+        lang = prefs.s("lang", "en-US")
+        wake = prefs.s("wake", "jarvis").lowercase().trim()
 
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
             say("Speech recognition is not available on this phone.")
@@ -259,45 +258,24 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
                 return "Goodbye."
             }
             lower.startsWith("open ") || lower.startsWith("launch ") ->
-                return openApp(cmd.substringAfter(' ').trim())
+                return Toolbox(this, prefs).openApp(cmd.substringAfter(' ').trim())
             lower.contains("what time") || lower.contains("the time") || lower == "time" ->
                 return "It is " + SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date())
             lower.contains("the date") || lower.contains("today's date") || lower.contains("what day") ->
                 return "Today is " + SimpleDateFormat("EEEE, d MMMM yyyy", Locale.getDefault()).format(Date())
         }
 
-        val key = prefs.getString("api_key", "") ?: ""
-        if (key.isBlank()) return "Please set your Gemini API key in the app."
-        val model = prefs.getString("model", "gemini-2.5-flash") ?: "gemini-2.5-flash"
-
-        val reply = Gemini.ask(key, model, history.toList(), cmd)
-        history.add(cmd to reply)
-        while (history.size > 6) history.removeAt(0)
-        return reply
-    }
-
-    private fun openApp(name: String): String {
-        if (name.isEmpty()) return "Which app?"
-        val q = name.lowercase().trim()
-        val pm = packageManager
-        val main = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-        val match = pm.queryIntentActivities(main, 0)
-            .firstOrNull { it.loadLabel(pm).toString().lowercase().contains(q) }
-            ?: return "I could not find an app called $name."
-        val launch = pm.getLaunchIntentForPackage(match.activityInfo.packageName)
-            ?: return "I could not open $name."
-        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        return try {
-            startActivity(launch)
-            val label = match.loadLabel(pm)
-            if (Settings.canDrawOverlays(this)) {
-                "Opening $label."
-            } else {
-                "Opening $label. If nothing happens, allow display over other apps in the Jarvis app."
-            }
-        } catch (e: Exception) {
-            "I could not open $name."
+        val agent = if (lower.contains("briefing") || lower.contains("brief me")) {
+            "briefing"
+        } else {
+            val a = prefs.s("agent", "assistant")
+            if (a == "briefing") "assistant" else a
         }
+        val reply = Agents.run(applicationContext, prefs, agent, history.toList(), cmd)
+        history.add(Msg("user", cmd))
+        history.add(Msg("assistant", reply))
+        while (history.size > 12) history.removeAt(0)
+        return reply
     }
 
     override fun onDestroy() {

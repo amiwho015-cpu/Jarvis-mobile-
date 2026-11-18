@@ -27,7 +27,8 @@ jobs:
 
       - name: Show errors
         if: failure()
-        run: grep -n -E "^e: |What went wrong|Execution failed|Caused by|licen|not found" -A4 build.log | head -60
+        run: |
+          grep -n -E "^e: |What went wrong|Execution failed|Caused by|licen|not found" -A4 build.log | head -60
 
       - uses: actions/upload-artifact@v4
         with:
